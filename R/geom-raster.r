@@ -1,61 +1,93 @@
 #' @include geom-.r
 NULL
 
-#' High-performance rectangular tiling.
-#'
-#' This is a special case of \code{\link{geom_tile}} where all tiles are
-#' the same size.  It is implemented highly efficiently using the internal
-#' \code{rasterGrob} function.
-#'
 #' @export
-#' @examples
-#' # Generate data
-#' pp <- function (n,r=4) {
-#'  x <- seq(-r*pi, r*pi, len=n)
-#'  df <- expand.grid(x=x, y=x)
-#'  df$r <- sqrt(df$x^2 + df$y^2)
-#'  df$z <- cos(df$r^2)*exp(-df$r/6)
-#'  df
-#' }
-#' qplot(x, y, data = pp(20), fill = z, geom = "raster")
-#'
-#' # For the special cases where it is applicable, geom_raster is much
-#' # faster than geom_tile:
-#' pp200 <- pp(200)
-#' base <- ggplot(pp200, aes(x, y, fill = z))
-#' benchplot(base + geom_raster())
-#' benchplot(base + geom_tile())
-geom_raster <- function (mapping = NULL, data = NULL, stat = "identity", position = "identity", ...) { 
-  GeomRaster$new(mapping = mapping, data = data, stat = stat, position = position, ...)
+#' @rdname geom_tile
+#' @param hjust,vjust horizontal and vertical justification of the grob.  Each
+#'   justification value should be a number between 0 and 1.  Defaults to 0.5
+#'   for both, centering each pixel over its data location.
+#' @param interpolate If \code{TRUE} interpolate linearly, if \code{FALSE}
+#'   (the default) don't interpolate.
+geom_raster <- function(mapping = NULL, data = NULL,
+                        stat = "identity", position = "identity",
+                        ...,
+                        hjust = 0.5,
+                        vjust = 0.5,
+                        interpolate = FALSE,
+                        na.rm = FALSE,
+                        show.legend = NA,
+                        inherit.aes = TRUE)
+{
+  stopifnot(is.numeric(hjust), length(hjust) == 1)
+  stopifnot(is.numeric(vjust), length(vjust) == 1)
+
+  layer(
+    data = data,
+    mapping = mapping,
+    stat = stat,
+    geom = GeomRaster,
+    position = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params = list(
+      hjust = hjust,
+      vjust = vjust,
+      interpolate = interpolate,
+      na.rm = na.rm,
+      ...
+    )
+  )
 }
 
-GeomRaster <- proto(Geom, {
-  objname <- "raster"
-  draw <- function(., data, scales, coordinates, ...) {
-    if (!inherits(coordinates, "cartesian")) {
+#' @rdname ggplot2-ggproto
+#' @format NULL
+#' @usage NULL
+#' @export
+GeomRaster <- ggproto("GeomRaster", Geom,
+  default_aes = aes(fill = "grey20", alpha = NA),
+  non_missing_aes = "fill",
+  required_aes = c("x", "y"),
+
+  setup_data = function(data, params) {
+    hjust <- params$hjust %||% 0.5
+    vjust <- params$vjust %||% 0.5
+
+    w <- resolution(data$x, FALSE)
+    h <- resolution(data$y, FALSE)
+
+    data$xmin <- data$x - w * (1 - hjust)
+    data$xmax <- data$x + w * hjust
+    data$ymin <- data$y - h * (1 - vjust)
+    data$ymax <- data$y + h * vjust
+    data
+  },
+
+  draw_panel = function(data, panel_scales, coord, interpolate = FALSE,
+                        hjust = 0.5, vjust = 0.5) {
+    if (!inherits(coord, "CoordCartesian")) {
       stop("geom_raster only works with Cartesian coordinates", call. = FALSE)
     }
-    data <- coord_transform(coordinates, data, scales)
-    raster <- acast(data, list("x", "y"), value.var = "fill")
-    
-    width <- resolution(data$x)
-    height <- resolution(data$y)
-    
-    x_rng <- range(data$x, na.rm = TRUE)
-    y_rng <- range(data$y, na.rm = TRUE)
-    
-    rasterGrob(raster, x_rng[1] - width / 2, y_rng[1] - height / 2, 
-      diff(x_rng) + width, diff(y_rng) + height, default.units = "native", 
-      just = c("left","bottom"), interpolate = FALSE)
-  }
+    data <- coord$transform(data, panel_scales)
 
+    # Convert vector of data to raster
+    x_pos <- as.integer((data$x - min(data$x)) / resolution(data$x, FALSE))
+    y_pos <- as.integer((data$y - min(data$y)) / resolution(data$y, FALSE))
 
-  icon <- function(.) {
-    rectGrob(c(0.25, 0.25, 0.75, 0.75), c(0.25, 0.75, 0.75, 0.25), width=0.5, height=c(0.67, 0.5, 0.67, 0.5), gp=gpar(col="grey20", fill=c("#804070", "#668040")))
-  }
+    nrow <- max(y_pos) + 1
+    ncol <- max(x_pos) + 1
 
-  default_stat <- function(.) StatIdentity
-  default_aes <- function(.) aes(fill = "grey20", alpha = 1)
-  required_aes <- c("x", "y")
-  guide_geom <- function(.) "polygon"
-})
+    raster <- matrix(NA_character_, nrow = nrow, ncol = ncol)
+    raster[cbind(nrow - y_pos, x_pos + 1)] <- alpha(data$fill, data$alpha)
+
+    # Figure out dimensions of raster on plot
+    x_rng <- c(min(data$xmin, na.rm = TRUE), max(data$xmax, na.rm = TRUE))
+    y_rng <- c(min(data$ymin, na.rm = TRUE), max(data$ymax, na.rm = TRUE))
+
+    rasterGrob(raster,
+      x = mean(x_rng), y = mean(y_rng),
+      width = diff(x_rng), height = diff(y_rng),
+      default.units = "native", interpolate = interpolate
+    )
+  },
+  draw_key = draw_key_rect
+)

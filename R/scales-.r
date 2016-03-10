@@ -1,99 +1,125 @@
-# Scales object encapsultes multiple scales.
-# All input and output done with data.frames to facilitate 
+# Scales object encapsulates multiple scales.
+# All input and output done with data.frames to facilitate
 # multiple input and output variables
 
-Scales <- setRefClass("Scales", fields = "scales", methods = list(
-  find = function(aesthetic) {
-    vapply(scales, function(x) any(aesthetic %in% x$aesthetics), logical(1))
+scales_list <- function() {
+  ggproto(NULL, ScalesList)
+}
+
+ScalesList <- ggproto("ScalesList", NULL,
+  scales = NULL,
+
+  find = function(self, aesthetic) {
+    vapply(self$scales, function(x) any(aesthetic %in% x$aesthetics), logical(1))
   },
-  has_scale = function(aesthetic) {
-    any(find(aesthetic))
+
+  has_scale = function(self, aesthetic) {
+    any(self$find(aesthetic))
   },
-  add = function(scale) {
+
+  add = function(self, scale) {
+    if (is.null(scale)) {
+      return()
+    }
+
+    prev_aes <- self$find(scale$aesthetics)
+    if (any(prev_aes)) {
+      # Get only the first aesthetic name in the returned vector -- it can
+      # sometimes be c("x", "xmin", "xmax", ....)
+      scalename <- self$scales[prev_aes][[1]]$aesthetics[1]
+      message_wrap("Scale for '", scalename,
+        "' is already present. Adding another scale for '", scalename,
+        "', which will replace the existing scale.")
+    }
+
     # Remove old scale for this aesthetic (if it exists)
-    scales <<- c(scales[!find(scale$aesthetics)], list(scale))
-  }, 
-  clone = function() {
-    new_scales <- lapply(scales, scale_clone)
-    Scales$new(new_scales)
+    self$scales <- c(self$scales[!prev_aes], list(scale))
   },
-  n = function() {
-    length(scales)
+
+  n = function(self) {
+    length(self$scales)
   },
-  input = function() {
-    unlist(lapply(scales, "[[", "aesthetics"))
-  }, 
-  initialize = function(scales = NULL) {
-    initFields(scales = scales)
+
+  input = function(self) {
+    unlist(lapply(self$scales, "[[", "aesthetics"))
   },
-  non_position_scales = function(.) {
-    Scales$new(scales[!find("x") & !find("y")])
+
+  # This actually makes a descendant of self, which is functionally the same
+  # as a actually clone for most purposes.
+  clone = function(self) {
+    ggproto(NULL, self, scales = lapply(self$scales, function(s) s$clone()))
   },
-  get_scales = function(output) {
-    scale <- scales[find(output)]
+
+  non_position_scales = function(self) {
+    ggproto(NULL, self, scales = self$scales[!self$find("x") & !self$find("y")])
+  },
+
+  get_scales = function(self, output) {
+    scale <- self$scales[self$find(output)]
     if (length(scale) == 0) return()
     scale[[1]]
-  }  
-))
+  }
+)
 
 # Train scale from a data frame
 scales_train_df <- function(scales, df, drop = FALSE) {
   if (empty(df) || length(scales$scales) == 0) return()
 
-  lapply(scales$scales, scale_train_df, df = df)
+  lapply(scales$scales, function(scale) scale$train_df(df = df))
 }
 
 # Map values from a data.frame. Returns data.frame
 scales_map_df <- function(scales, df) {
-  if (empty(df) || length(scales$scales) == 0) return()
-  
-  mapped <- unlist(lapply(scales$scales, scale_map_df, df = df), recursive = FALSE)
-  
-  quickdf(c(mapped, df[setdiff(names(df), names(mapped))]))
+  if (empty(df) || length(scales$scales) == 0) return(df)
+
+  mapped <- unlist(lapply(scales$scales, function(scale) scale$map_df(df = df)), recursive = FALSE)
+
+  plyr::quickdf(c(mapped, df[setdiff(names(df), names(mapped))]))
 }
 
 # Transform values to cardinal representation
 scales_transform_df <- function(scales, df) {
   if (empty(df) || length(scales$scales) == 0) return(df)
-  
-  transformed <- unlist(lapply(scales$scales, scale_transform_df, df = df),
+
+  transformed <- unlist(lapply(scales$scales, function(s) s$transform_df(df = df)),
     recursive = FALSE)
-  quickdf(c(transformed, df[setdiff(names(df), names(transformed))]))
+  plyr::quickdf(c(transformed, df[setdiff(names(df), names(transformed))]))
 }
 
+# @param aesthetics A list of aesthetic-variable mappings. The name of each
+#   item is the aesthetic, and the value of each item is the variable in data.
 scales_add_defaults <- function(scales, data, aesthetics, env) {
   if (is.null(aesthetics)) return()
   names(aesthetics) <- unlist(lapply(names(aesthetics), aes_to_scale))
-  
+
   new_aesthetics <- setdiff(names(aesthetics), scales$input())
   # No new aesthetics, so no new scales to add
-  if(is.null(new_aesthetics)) return()
-  
-  # Determine variable type for each column -------------------------------
-  vartype <- function(x) {
-    if (inherits(x, "Date")) return("date")
-    if (inherits(x, "POSIXt")) return("datetime")
-    if (is.numeric(x)) return("continuous")
-    
-    "discrete"
+  if (is.null(new_aesthetics)) return()
+
+  datacols <- plyr::tryapply(
+    aesthetics[new_aesthetics], eval,
+    envir = data, enclos = env
+  )
+
+  for (aes in names(datacols)) {
+    scales$add(find_scale(aes, datacols[[aes]], env))
   }
 
-  datacols <- tryapply(
-    aesthetics[new_aesthetics], eval, 
-    envir=data, enclos=env
-  )
-  new_aesthetics <- intersect(new_aesthetics, names(datacols))
-  if (length(datacols) == 0) return()
-  
-  vartypes <- sapply(datacols, vartype)
-  
-  # Work out scale names
-  scale_name_type <- paste("scale", new_aesthetics, vartypes, sep="_")
+}
 
-  for(i in 1:length(new_aesthetics)) {
-    if (exists(scale_name_type[i])) {
-      scale <- get(scale_name_type[i], globalenv())()
-      scales$add(scale)
-    }
+# Add missing but required scales.
+# @param aesthetics A character vector of aesthetics. Typically c("x", "y").
+scales_add_missing <- function(plot, aesthetics, env) {
+
+  # Keep only aesthetics that aren't already in plot$scales
+  aesthetics <- setdiff(aesthetics, plot$scales$input())
+
+  for (aes in aesthetics) {
+    scale_name <- paste("scale", aes, "continuous", sep = "_")
+
+    scale_f <- find_global(scale_name, env, mode = "function")
+    plot$scales$add(scale_f())
   }
 }
+
+

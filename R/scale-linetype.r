@@ -1,25 +1,22 @@
 #' Scale for line patterns.
-#' 
-#' Default line types based on a set supplied by Richard Pearson, 
+#'
+#' Default line types based on a set supplied by Richard Pearson,
 #' University of Manchester.  Line types can not be mapped to continuous
 #' values.
 #'
+#' @inheritParams scale_x_discrete
+#' @param na.value The linetype to use for \code{NA} values.
 #' @rdname scale_linetype
 #' @export
 #' @examples
-#' ec_scaled <- data.frame(
-#'   date = economics$date, 
-#'   rescaler(economics[, -(1:2)], "range")
-#' )
-#' ecm <- melt(ec_scaled, id = "date")
-#' 
-#' qplot(date, value, data=ecm, geom="line", group=variable)
-#' qplot(date, value, data=ecm, geom="line", linetype=variable)
-#' qplot(date, value, data=ecm, geom="line", colour=variable)
-#' 
+#' base <- ggplot(economics_long, aes(date, value01))
+#' base + geom_line(aes(group = variable))
+#' base + geom_line(aes(linetype = variable))
+#'
 #' # See scale_manual for more flexibility
-scale_linetype <- function(...) {
-  discrete_scale("linetype", "linetype_d", linetype_pal(), ...)
+scale_linetype <- function(..., na.value = "blank") {
+  discrete_scale("linetype", "linetype_d", linetype_pal(),
+    na.value = na.value, ...)
 }
 
 #' @rdname scale_linetype
@@ -30,11 +27,3 @@ scale_linetype_continuous <- function(...) {
 #' @rdname scale_linetype
 #' @export
 scale_linetype_discrete <- scale_linetype
- 
-icon.linetype <- function(.) {
-  gTree(children=gList(
-    segmentsGrob(0, 0.25, 1, 0.25, gp=gpar(lty=1)),
-    segmentsGrob(0, 0.50, 1, 0.50, gp=gpar(lty=2)),
-    segmentsGrob(0, 0.75, 1, 0.75, gp=gpar(lty=3))
-  ))
-}
